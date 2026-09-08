@@ -93,23 +93,45 @@ func TestForwardEndToEnd(t *testing.T) {
 	}
 	t.Logf("forwarding from %s", addr)
 
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
+	t.Run("TCP", func(t *testing.T) {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
 
-	const payload = "forwarded over tailcat"
-	if _, err := conn.Write([]byte(payload)); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := conn.Read(got); err != nil {
-		t.Fatalf("read: %v\nforward stderr:\n%s\nserver stderr:\n%s", err, forwardStderr(), serverStderr)
-	}
-	if string(got) != payload {
-		t.Errorf("got %q; want %q", got, payload)
-	}
+		const payload = "forwarded over tailcat"
+		if _, err := conn.Write([]byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(payload))
+		if _, err := conn.Read(got); err != nil {
+			t.Fatalf("read: %v\nforward stderr:\n%s\nserver stderr:\n%s", err, forwardStderr(), serverStderr)
+		}
+		if string(got) != payload {
+			t.Errorf("got %q; want %q", got, payload)
+		}
+	})
+
+	t.Run("UDP", func(t *testing.T) {
+		conn, err := net.DialUDP("tcp", nil, net.UDPAddrFromAddrPort(netip.MustParseAddrPort(addr)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+
+		const payload = "forwarded over tailcat"
+		if _, err := conn.Write([]byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(payload))
+		if _, err := conn.Read(got); err != nil {
+			t.Fatalf("read: %v\nforward stderr:\n%s\nserver stderr:\n%s", err, forwardStderr(), serverStderr)
+		}
+		if string(got) != payload {
+			t.Errorf("got %q; want %q", got, payload)
+		}
+	})
 }
 
 func TestForwardToExitNodeTarget(t *testing.T) {

@@ -93,6 +93,7 @@ func runForward(ctx context.Context, logf logger.Logf, bind string, args []strin
 			}
 			return usagef("mapping %q is invalid: %v", spec, err)
 		}
+
 		ln, err := net.Listen("tcp", mapping.listenAddr)
 		if err != nil {
 			for _, old := range listeners {
@@ -103,6 +104,16 @@ func runForward(ctx context.Context, logf logger.Logf, bind string, args []strin
 		listeners = append(listeners, ln)
 		listenersWG.Add(1)
 		go forwardListener(ctx, logf, cl, ln, mapping, &listenersWG, &connectionsWG, &active)
+
+		udpLn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.MustParseAddrPort(mapping.listenAddr)))
+		if err != nil {
+			for _, old := range listeners {
+				old.Close()
+			}
+			return fmt.Errorf("listen on %s: %w", mapping.listenAddr, err)
+		}
+		listenersWG.Add(1)
+		go forwardListenerUDP(ctx, logf, cl, udpLn, mapping, &listenersWG, &connectionsWG, &active)
 	}
 
 	<-ctx.Done()
@@ -117,7 +128,7 @@ func forwardListener(ctx context.Context, logf logger.Logf, cl *tailcat.Client, 
 	// Print unconditionally (not via the verbose-only logf): with a
 	// local port of 0 this line is the only way to learn which port
 	// the OS picked.
-	log.Printf("forwarding %s -> remote %s", ln.Addr(), mapping.remoteTarget())
+	log.Printf("[TCP] forwarding %s -> remote %s", ln.Addr(), mapping.remoteTarget())
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -144,6 +155,75 @@ func forwardListener(ctx context.Context, logf logger.Logf, cl *tailcat.Client, 
 			}
 			tailcat.ProxyConns(conn, remote)
 		}()
+	}
+}
+
+func forwardListenerUDP(ctx context.Context, logf logger.Logf, cl *tailcat.Client, conn *net.UDPConn, mapping forwardSpec, listenersWG, connectionsWG *sync.WaitGroup, active *sync.Map) {
+	defer listenersWG.Done()
+	defer conn.Close()
+	// Print unconditionally (not via the verbose-only logf): with a
+	// local port of 0 this line is the only way to learn which port
+	// the OS picked.
+	log.Printf("[UDP] forwarding %s -> remote %s", conn.LocalAddr(), mapping.remoteTarget())
+
+	var remote tailcat.ConnPacketConn
+	var err error
+
+	if mapping.target.IsValid() {
+		remote, err = cl.DialUDP(ctx, mapping.target)
+	} else {
+		remote, err = cl.DialUDPPort(ctx, mapping.port)
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			logf("dial remote target %s: %v", mapping.remoteTarget(), err)
+		}
+		return
+	}
+
+	connectionsWG.Add(1)
+	defer connectionsWG.Done()
+
+	active.Store(conn, struct{}{})
+	defer active.Delete(conn)
+
+	var clientAddr *net.UDPAddr
+
+	go func() {
+		for {
+			buf := make([]byte, tailcat.MaxUDPPayload)
+			n, addr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+
+			// store the address for returns.
+			clientAddr = addr
+
+			if _, err := remote.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, tailcat.MaxUDPPayload)
+
+	for {
+		n, err := remote.Read(buf)
+		if err != nil {
+			if ctx.Err() == nil {
+				logf("err")
+			}
+			return
+		}
+
+		if clientAddr == nil {
+			continue
+		}
+
+		if _, err := conn.WriteToUDP(buf[:n], clientAddr); err != nil {
+			return
+		}
 	}
 }
 

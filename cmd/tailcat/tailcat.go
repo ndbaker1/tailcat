@@ -1391,6 +1391,7 @@ func server(logf logger.Logf, serveSpec string, execArgs []string) {
 			ports = append([]uint16{22}, ports...)
 		}
 		s.ServedTCPPorts = portRanges(ports)
+		s.ServedUDPPorts = portRanges(ports)
 	}
 	if *flagAllow != "" {
 		for _, ks := range strings.Split(*flagAllow, ",") {
@@ -1418,9 +1419,30 @@ func server(logf logger.Logf, serveSpec string, execArgs []string) {
 		}
 	}
 
+	udpForwardTo := func(ipPortStr string) func(tailcat.ConnPacketConn) {
+		return func(c tailcat.ConnPacketConn) {
+			addr, err := net.ResolveUDPAddr("udp", ipPortStr)
+			if err != nil {
+				logf("error resolving udp address: %v", ipPortStr)
+				c.Close()
+				return
+			}
+			localCpc, err := net.DialUDP("udp", nil, addr)
+			if err != nil {
+				logf("error proxying to %v: %v", ipPortStr, err)
+				c.Close()
+				return
+			}
+			tailcat.ProxyPacketConns(c, localCpc)
+		}
+	}
+
 	if services.Contains("exit-node") {
 		s.OnTCPForward = func(dst netip.AddrPort) (handler func(net.Conn)) {
 			return tcpForwardTo(dst.String())
+		}
+		s.OnUDPForward = func(dst netip.AddrPort) (handler func(tailcat.ConnPacketConn)) {
+			return udpForwardTo(dst.String())
 		}
 	}
 
@@ -1494,6 +1516,20 @@ func server(logf logger.Logf, serveSpec string, execArgs []string) {
 			return nil // RST
 		}
 		return tcpForwardTo(fmt.Sprintf("localhost:%v", port))
+	}
+
+	s.OnUDP = func(port uint16) (handler func(tailcat.ConnPacketConn)) {
+		if portSet.Contains(port) {
+			return udpForwardTo(fmt.Sprintf("localhost:%v", port))
+		}
+
+		if services.Contains("exit-node") {
+			// Being an exit node includes localhost without needing
+			// to specify all the local port ranges.
+			return udpForwardTo(fmt.Sprintf("localhost:%v", port))
+		}
+
+		return nil
 	}
 
 	if err := s.Start(); err != nil {
